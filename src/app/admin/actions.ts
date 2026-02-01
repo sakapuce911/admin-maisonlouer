@@ -13,6 +13,7 @@
    - AUCUNE publication automatique (publie = false par défaut)
 
    + ✅ NOUVEAU : Optimisation SEO (Gemini)
+   + ✅ Verrou strict louer/vendre
 ========================================================= */
 
 import { cookies } from "next/headers";
@@ -194,7 +195,10 @@ function guessTitleFromText(text: string) {
 
   for (const l of lines) {
     const s = squashSpaces(l);
-    if (/(à\s*vendre|a\s*vendre|à\s*louer|a\s*louer|villa|maison|appartement|duplex|terrain)/i.test(s) && s.length >= 10) {
+    if (
+      /(à\s*vendre|a\s*vendre|à\s*louer|a\s*louer|villa|maison|appartement|duplex|terrain)/i.test(s) &&
+      s.length >= 10
+    ) {
       return s.slice(0, 140);
     }
   }
@@ -460,10 +464,10 @@ export async function analyzeSourceAction(fd: FormData) {
       draft = { ...draft, ...fromUrl };
       draft.publie = false;
       sourceTextForRewrite += `\n${fromUrl.titre ?? ""}\n${fromUrl.description ?? ""}\n`;
-    } catch (e: any) {
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "erreur inconnue";
       draft.description =
-        `⚠️ Import URL impossible : ${e?.message ?? "erreur inconnue"}\n` +
-        (draft.description ? `\n${draft.description}` : "");
+        `⚠️ Import URL impossible : ${msg}\n` + (draft.description ? `\n${draft.description}` : "");
       draft.publie = false;
     }
   }
@@ -604,9 +608,6 @@ export async function deleteAnnonceAction(fd: FormData) {
 
 /* =========================================================
    ✅ SEO OPTIMIZER (Gemini)
-   ✅ MODIF: se base sur typeoffre + verrou louer/vendre
-   ✅ MODIF: modèle par défaut gemini-2.5-flash-lite
-   ✅ MODIF: garde-fou serveur
 ========================================================= */
 
 export type SeoOptimizeResult = {
@@ -626,14 +627,25 @@ function safeJsonFromText(raw: string) {
   }
 }
 
-function clampScore(n: any) {
+function clampScore(n: unknown) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
   return Math.max(0, Math.min(100, Math.round(x)));
 }
 
-// ✅ petit helper pour stabiliser les valeurs Louer/Vendre
-function normalizeTypeOffre(raw: string | null) {
+// ✅ FIX VERCEL: pas de "implicit any"
+function normalizeStringArray(value: unknown, max = 20): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((v: unknown) => String(v).trim())
+    .filter((s: string) => s.length > 0)
+    .slice(0, max);
+}
+
+// ✅ petit helper pour stabiliser Louer/Vendre
+type TypeOffre = "Louer" | "Vendre";
+
+function normalizeTypeOffre(raw: string | null): TypeOffre | null {
   const t = (raw ?? "").toLowerCase();
   if (t.includes("vend")) return "Vendre";
   if (t.includes("loue") || t.includes("loc")) return "Louer";
@@ -644,17 +656,12 @@ export async function optimizeSeoDescriptionAction(fd: FormData): Promise<SeoOpt
   await requireAuth();
 
   const description = getString(fd, "description") ?? "";
-
-  // Contexte local (tu peux les envoyer depuis l'UI, sinon defaults)
   const city = getString(fd, "city") ?? "Antananarivo";
   const country = getString(fd, "country") ?? "Madagascar";
 
   // ✅ typeoffre doit venir de l’UI (select du formulaire)
   // fallback: si non fourni, on essaie de le deviner dans le texte, sinon Louer
-  const typeoffre =
-    normalizeTypeOffre(getString(fd, "typeoffre")) ??
-    guessTypeOffre(description) ??
-    "Louer";
+  const typeoffre: TypeOffre = normalizeTypeOffre(getString(fd, "typeoffre")) ?? (guessTypeOffre(description) as TypeOffre) ?? "Louer";
 
   // ✅ Intent = UNIQUEMENT basé sur typeoffre
   const intent = typeoffre === "Louer" ? "maison à louer" : "maison à vendre";
@@ -666,7 +673,7 @@ export async function optimizeSeoDescriptionAction(fd: FormData): Promise<SeoOpt
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY manquant dans .env.local");
 
-  // ✅ modèle par défaut compatible (évite le 404 sur 1.5-flash)
+  // ✅ modèle par défaut (tu peux override via Vercel env GEMINI_MODEL)
   const modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
   const { GoogleGenerativeAI } = await import("@google/generative-ai");
@@ -698,7 +705,7 @@ export async function optimizeSeoDescriptionAction(fd: FormData): Promise<SeoOpt
     "",
     "CONTRAINTE CRITIQUE (type d’offre):",
     `- INTERDIT ABSOLU: ne jamais utiliser le mot "${forbiddenWord}" ni suggérer l'autre type d'offre.`,
-    `- OB LIGATOIRE: le texte doit clairement être une annonce "${intent}" (pas les deux).`,
+    `- OBLIGATOIRE: le texte doit clairement être une annonce "${intent}" (pas les deux).`,
     "",
     "Style: clair, naturel, orienté client, mobile-friendly. Phrases courtes. Listes si utile.",
     "Ne pas ajouter de hashtags. Emojis: 0 à 2 max.",
@@ -730,7 +737,6 @@ Contraintes:
 - keywords: 8 à 15 expressions FR adaptées à ${city}, liées à "${intent}".
 `.trim();
 
-  // ✅ SDK OK : on envoie un STRING
   const input = `${systemRules}\n\n${prompt}`;
   const result = await model.generateContent(input);
 
@@ -750,37 +756,30 @@ Contraintes:
   }
 
   let optimizedDescription =
-    typeof parsed.optimizedDescription === "string" ? parsed.optimizedDescription.trim() : description;
+    typeof (parsed as any).optimizedDescription === "string"
+      ? String((parsed as any).optimizedDescription).trim()
+      : description;
 
-  // ✅ GARDE-FOU serveur :
-  // Si location -> on supprime vente ; si vente -> on supprime location
+  // ✅ GARDE-FOU serveur : supprime l'autre type offre si jamais Gemini l'insère
   const reForbidden =
     typeoffre === "Louer"
       ? /\b(à\s*vendre|a\s*vendre|vente|vendre)\b/gi
       : /\b(à\s*louer|a\s*louer|location|louer)\b/gi;
 
-  optimizedDescription = optimizedDescription
-    .replace(reForbidden, "")
-    .replace(/\s{2,}/g, " ")
-    .trim();
+  optimizedDescription = optimizedDescription.replace(reForbidden, "").replace(/\s{2,}/g, " ").trim();
 
   // Si le mot requis n'apparait pas, on réinjecte une intro propre
   if (!new RegExp(`\\b${requiredWord}\\b`, "i").test(optimizedDescription)) {
     optimizedDescription = `${typeoffre === "Louer" ? "Maison à louer" : "Maison à vendre"} à ${city}, ${country}.\n\n${optimizedDescription}`.trim();
   }
 
-  const keywords = Array.isArray(parsed.keywords)
-    ? parsed.keywords.map(String).map((s) => s.trim()).filter(Boolean)
-    : [];
-
-  const improvements = Array.isArray(parsed.improvements)
-    ? parsed.improvements.map(String).map((s) => s.trim()).filter(Boolean)
-    : [];
+  const keywords = normalizeStringArray((parsed as any).keywords, 20);
+  const improvements = normalizeStringArray((parsed as any).improvements, 20);
 
   return {
-    score: clampScore(parsed.score),
+    score: clampScore((parsed as any).score),
     optimizedDescription,
-    keywords: keywords.slice(0, 20),
-    improvements: improvements.slice(0, 20),
+    keywords,
+    improvements,
   };
 }

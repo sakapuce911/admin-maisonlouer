@@ -309,7 +309,7 @@ export default function ImportClient({
                   <span style={{ fontSize: 12.5, color: "rgba(255,255,255,0.72)" }}>Type d’offre</span>
                   <select
                     value={seoTypeOffre}
-                    onChange={(e) => setSeoTypeOffre((e.target.value as TypeOffre) ?? "Louer")}
+                    onChange={(e) => setSeoTypeOffre(e.target.value === "Vendre" ? "Vendre" : "Louer")}
                     style={{
                       padding: "10px 12px",
                       borderRadius: 14,
