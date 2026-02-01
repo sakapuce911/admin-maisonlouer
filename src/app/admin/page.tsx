@@ -11,6 +11,7 @@ import { cookies } from "next/headers";
 import { supabaseServer } from "../../lib/supabase/server";
 
 import ImportClient from "./ImportClient";
+import SeoBridgeClient from "./SeoBridgeClient";
 
 import {
   analyzeSourceAction,
@@ -20,6 +21,7 @@ import {
   saveDraftAnnonceAction,
   signOutAction,
   type DraftAnnonce,
+  optimizeSeoDescriptionAction, // ✅ NEW
 } from "./actions";
 
 function safeJsonParse<T>(s: string | null): T | null {
@@ -116,7 +118,12 @@ export default async function AdminPage() {
               <b>brouillon</b> et on préremplit le formulaire.
             </p>
 
-            <ImportClient defaultUrl={draft?.source_url ?? ""} analyzeAction={analyzeSourceAction} />
+            {/* ✅ On passe aussi l'action Gemini (SEO) */}
+            <ImportClient
+              defaultUrl={draft?.source_url ?? ""}
+              analyzeAction={analyzeSourceAction}
+              optimizeSeoAction={optimizeSeoDescriptionAction}
+            />
 
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 12 }}>
               <form action={clearDraftAction}>
@@ -143,10 +150,18 @@ export default async function AdminPage() {
             <h2>Créer une annonce</h2>
             <p>Vérifie et ajuste la reformulation avant d’enregistrer.</p>
 
+            {/* ✅ Pont client : écoute "Appliquer" depuis ImportClient et remplit la description */}
+            <SeoBridgeClient targetTextareaName="description" />
+
             <form action={createAnnonceAction} className="ml-form">
               <div className="ml-field">
                 <label>Titre</label>
-                <input className="ml-input" name="titre" placeholder="Ex: Villa T4 à Ivandry" defaultValue={draft?.titre ?? ""} />
+                <input
+                  className="ml-input"
+                  name="titre"
+                  placeholder="Ex: Villa T4 à Ivandry"
+                  defaultValue={draft?.titre ?? ""}
+                />
               </div>
 
               <div className="ml-row-2">
@@ -160,42 +175,81 @@ export default async function AdminPage() {
 
                 <div className="ml-field">
                   <label>Type bien</label>
-                  <input className="ml-input" name="typebien" defaultValue={draft?.typebien ?? ""} placeholder="Maison, Appartement, Terrain…" />
+                  <input
+                    className="ml-input"
+                    name="typebien"
+                    defaultValue={draft?.typebien ?? ""}
+                    placeholder="Maison, Appartement, Terrain…"
+                  />
                 </div>
               </div>
 
               <div className="ml-row-2">
                 <div className="ml-field">
                   <label>Ville</label>
-                  <input className="ml-input" name="ville" defaultValue={draft?.ville ?? ""} placeholder="Antananarivo, Toamasina…" />
+                  <input
+                    className="ml-input"
+                    name="ville"
+                    defaultValue={draft?.ville ?? ""}
+                    placeholder="Antananarivo, Toamasina…"
+                  />
                 </div>
 
                 <div className="ml-field">
                   <label>Quartier</label>
-                  <input className="ml-input" name="quartier" defaultValue={draft?.quartier ?? ""} placeholder="Ivandry, Ivato…" />
+                  <input
+                    className="ml-input"
+                    name="quartier"
+                    defaultValue={draft?.quartier ?? ""}
+                    placeholder="Ivandry, Ivato…"
+                  />
                 </div>
               </div>
 
               <div className="ml-row-2">
                 <div className="ml-field">
                   <label>Prix (Ar)</label>
-                  <input className="ml-input" name="prixar" inputMode="numeric" defaultValue={draft?.prixar ?? ""} placeholder="Ex: 400000000" />
+                  <input
+                    className="ml-input"
+                    name="prixar"
+                    inputMode="numeric"
+                    defaultValue={draft?.prixar ?? ""}
+                    placeholder="Ex: 400000000"
+                  />
                 </div>
 
                 <div className="ml-field">
                   <label>Surface</label>
-                  <input className="ml-input" name="surface" inputMode="decimal" defaultValue={draft?.surface ?? ""} placeholder="Ex: 520" />
+                  <input
+                    className="ml-input"
+                    name="surface"
+                    inputMode="decimal"
+                    defaultValue={draft?.surface ?? ""}
+                    placeholder="Ex: 520"
+                  />
                 </div>
               </div>
 
               <div className="ml-row-2">
                 <div className="ml-field">
                   <label>Chambres</label>
-                  <input className="ml-input" name="chambres" inputMode="numeric" defaultValue={draft?.chambres ?? ""} placeholder="Ex: 4" />
+                  <input
+                    className="ml-input"
+                    name="chambres"
+                    inputMode="numeric"
+                    defaultValue={draft?.chambres ?? ""}
+                    placeholder="Ex: 4"
+                  />
                 </div>
                 <div className="ml-field">
                   <label>SDB</label>
-                  <input className="ml-input" name="sdb" inputMode="numeric" defaultValue={draft?.sdb ?? ""} placeholder="Ex: 2" />
+                  <input
+                    className="ml-input"
+                    name="sdb"
+                    inputMode="numeric"
+                    defaultValue={draft?.sdb ?? ""}
+                    placeholder="Ex: 2"
+                  />
                 </div>
               </div>
 
@@ -214,6 +268,9 @@ export default async function AdminPage() {
               <div className="ml-field">
                 <label>Description</label>
                 <textarea className="ml-textarea" name="description" rows={7} defaultValue={draft?.description ?? ""} />
+                <div className="ml-help">
+                  Astuce : tu peux cliquer <b>Appliquer</b> dans l’optimiseur SEO pour remplacer cette description automatiquement.
+                </div>
               </div>
 
               <div className="ml-row-2">

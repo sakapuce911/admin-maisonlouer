@@ -11,6 +11,8 @@
    - ✅ OCR fait côté client (tesseract.js gratuit)
    - ✅ NOUVELLE RÈGLE : reformulation automatique (titre + description)
    - AUCUNE publication automatique (publie = false par défaut)
+
+   + ✅ NOUVEAU : Optimisation SEO (Gemini)
 ========================================================= */
 
 import { cookies } from "next/headers";
@@ -318,8 +320,6 @@ function buildDraftFromOcrText(ocrText: string): Partial<DraftAnnonce> {
 
 /* =========================
    ✅ REFORMULATION MARKETING (gratuite, sans IA payante)
-   - utilise UNIQUEMENT les infos extraites (URL/OCR)
-   - structure : accroche + points clés + prix + CTA
 ========================= */
 function extractHighlights(sourceText: string) {
   const t = sourceText || "";
@@ -360,7 +360,6 @@ function buildMarketingTitle(d: DraftAnnonce) {
   const surface = d.surface ? `• ${d.surface} m²` : "";
   const price = d.prixar ? `• ${formatPriceAr(d.prixar)}` : "";
 
-  // Titre court, vendeur, stable
   const title = `${offer} : ${type} ${loc} ${surface} ${price}`.replace(/\s+/g, " ").trim();
   return clamp(title, 90);
 }
@@ -371,13 +370,10 @@ function buildMarketingDescription(d: DraftAnnonce, sourceText: string) {
   const loc = locParts.length ? locParts.join(", ") : "Madagascar";
 
   const highlights = extractHighlights(sourceText);
-
   const lines: string[] = [];
 
-  // Accroche
   lines.push(`✨ Découvrez cette belle opportunité de ${offer} à ${loc}.`);
 
-  // Résumé factuel
   const facts: string[] = [];
   if (d.typebien) facts.push(d.typebien);
   if (d.surface) facts.push(`${d.surface} m²`);
@@ -385,31 +381,26 @@ function buildMarketingDescription(d: DraftAnnonce, sourceText: string) {
   if (d.sdb) facts.push(`${d.sdb} SDB`);
   if (facts.length) lines.push(`🏡 Caractéristiques : ${facts.join(" • ")}.`);
 
-  // Avantages détectés
   if (highlights.length) {
     lines.push(`✅ Points forts :`);
     for (const h of highlights) lines.push(`- ${h}`);
   }
 
-  // Prix
   const price = formatPriceAr(d.prixar ?? null);
   if (price) lines.push(`💰 Prix : ${price}.`);
 
-  // CTA
   if (d.whatsapp) {
     lines.push(`📲 Contact WhatsApp : ${d.whatsapp}`);
   } else {
     lines.push(`📲 Contact : écrivez-nous sur WhatsApp pour plus d’infos et une visite.`);
   }
 
-  // Petit disclaimer "anti-hallucination"
   lines.push(`ℹ️ Infos générées à partir de la source (URL / capture). Merci de vérifier avant publication.`);
 
   return clamp(lines.join("\n"), 1800);
 }
 
 function applyMarketingRewrite(draft: DraftAnnonce, sourceText: string) {
-  // On reformule uniquement si on a un minimum d’infos
   const hasAnySignal =
     !!draft.titre ||
     !!draft.description ||
@@ -441,7 +432,6 @@ export async function analyzeSourceAction(fd: FormData) {
   const url = getString(fd, "source_url");
   const ocrText = getString(fd, "ocr_text");
 
-  // base draft
   let draft: DraftAnnonce = {
     source_url: url,
     titre: null,
@@ -463,15 +453,12 @@ export async function analyzeSourceAction(fd: FormData) {
 
   let sourceTextForRewrite = "";
 
-  // 1) URL -> extraction V1
   if (url) {
     try {
       const html = await fetchHtml(url);
       const fromUrl = buildDraftFromHtml(html, url);
       draft = { ...draft, ...fromUrl };
       draft.publie = false;
-
-      // on garde du texte source pour reformulation (sans mettre tout le HTML)
       sourceTextForRewrite += `\n${fromUrl.titre ?? ""}\n${fromUrl.description ?? ""}\n`;
     } catch (e: any) {
       draft.description =
@@ -481,7 +468,6 @@ export async function analyzeSourceAction(fd: FormData) {
     }
   }
 
-  // 2) OCR text (depuis le navigateur)
   if (ocrText) {
     const fromOcr = buildDraftFromOcrText(ocrText);
 
@@ -503,16 +489,12 @@ export async function analyzeSourceAction(fd: FormData) {
     sourceTextForRewrite += `\n${ocrText}\n`;
   }
 
-  // ✅ 3) NOUVELLE RÈGLE : Reformulation automatique (titre + description)
-  // (utilise uniquement les infos extraites, pas d’invention)
   draft = applyMarketingRewrite(draft, sourceTextForRewrite);
 
-  // note UX (facultatif)
   draft.description =
     (draft.description ? `${draft.description}\n\n` : "") +
     `✍️ Titre & description reformulés automatiquement pour attirer le client (à vérifier avant publication).`;
 
-  // Sauvegarde cookie draft
   const jar = await cookies();
   jar.set("ml_draft_annonce", JSON.stringify(draft), {
     path: "/",
@@ -558,7 +540,7 @@ export async function saveDraftAnnonceAction(fd: FormData) {
     whatsapp: getString(fd, "whatsapp"),
     lat: getNumber(fd, "lat"),
     lng: getNumber(fd, "lng"),
-    publie: false, // ✅ FORCE BROUILLON
+    publie: false,
   };
 
   const { error } = await supabase.from("annonces").insert(payload);
@@ -618,4 +600,187 @@ export async function deleteAnnonceAction(fd: FormData) {
 
   revalidatePath("/admin");
   redirect("/admin");
+}
+
+/* =========================================================
+   ✅ SEO OPTIMIZER (Gemini)
+   ✅ MODIF: se base sur typeoffre + verrou louer/vendre
+   ✅ MODIF: modèle par défaut gemini-2.5-flash-lite
+   ✅ MODIF: garde-fou serveur
+========================================================= */
+
+export type SeoOptimizeResult = {
+  score: number;
+  optimizedDescription: string;
+  keywords: string[];
+  improvements: string[];
+};
+
+function safeJsonFromText(raw: string) {
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try {
+    return JSON.parse(m[0]);
+  } catch {
+    return null;
+  }
+}
+
+function clampScore(n: any) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(100, Math.round(x)));
+}
+
+// ✅ petit helper pour stabiliser les valeurs Louer/Vendre
+function normalizeTypeOffre(raw: string | null) {
+  const t = (raw ?? "").toLowerCase();
+  if (t.includes("vend")) return "Vendre";
+  if (t.includes("loue") || t.includes("loc")) return "Louer";
+  return null;
+}
+
+export async function optimizeSeoDescriptionAction(fd: FormData): Promise<SeoOptimizeResult> {
+  await requireAuth();
+
+  const description = getString(fd, "description") ?? "";
+
+  // Contexte local (tu peux les envoyer depuis l'UI, sinon defaults)
+  const city = getString(fd, "city") ?? "Antananarivo";
+  const country = getString(fd, "country") ?? "Madagascar";
+
+  // ✅ typeoffre doit venir de l’UI (select du formulaire)
+  // fallback: si non fourni, on essaie de le deviner dans le texte, sinon Louer
+  const typeoffre =
+    normalizeTypeOffre(getString(fd, "typeoffre")) ??
+    guessTypeOffre(description) ??
+    "Louer";
+
+  // ✅ Intent = UNIQUEMENT basé sur typeoffre
+  const intent = typeoffre === "Louer" ? "maison à louer" : "maison à vendre";
+
+  if (description.trim().length < 40) {
+    throw new Error("Description trop courte. Ajoute plus de détails (≥ 40 caractères).");
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY manquant dans .env.local");
+
+  // ✅ modèle par défaut compatible (évite le 404 sur 1.5-flash)
+  const modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+
+  const { GoogleGenerativeAI } = await import("@google/generative-ai");
+  const genAI = new GoogleGenerativeAI(apiKey);
+
+  const model = genAI.getGenerativeModel({
+    model: modelName,
+    generationConfig: {
+      temperature: 0.25,
+      topP: 0.9,
+      maxOutputTokens: 900,
+    },
+  });
+
+  // 🔒 verrou strict louer/vendre
+  const forbiddenWord = typeoffre === "Louer" ? "vendre" : "louer";
+  const requiredWord = typeoffre === "Louer" ? "louer" : "vendre";
+
+  const systemRules = [
+    "Tu es un expert SEO immobilier francophone (Madagascar).",
+    "Objectif: optimiser une DESCRIPTION d'annonce pour le référencement (Google) et la conversion.",
+    `Marché: ${city} (Tana), ${country}.`,
+    `Type d'offre OBLIGATOIRE: ${typeoffre}.`,
+    "",
+    "CONTRAINTE CRITIQUE (anti-hallucination):",
+    "- Tu ne dois PAS inventer des faits (prix, quartier, nombre de chambres, superficie) s’ils ne sont pas présents dans le texte source.",
+    "- Tu peux uniquement reformuler, structurer, clarifier, mettre en avant les infos déjà présentes.",
+    "- Si une info manque, propose une amélioration sous forme de suggestion à compléter (dans 'improvements').",
+    "",
+    "CONTRAINTE CRITIQUE (type d’offre):",
+    `- INTERDIT ABSOLU: ne jamais utiliser le mot "${forbiddenWord}" ni suggérer l'autre type d'offre.`,
+    `- OB LIGATOIRE: le texte doit clairement être une annonce "${intent}" (pas les deux).`,
+    "",
+    "Style: clair, naturel, orienté client, mobile-friendly. Phrases courtes. Listes si utile.",
+    "Ne pas ajouter de hashtags. Emojis: 0 à 2 max.",
+    "Sortie STRICTEMENT en JSON valide (pas de texte autour).",
+  ].join("\n");
+
+  const prompt = `
+Type d'offre: ${typeoffre}
+Ville ciblée: ${city}
+Pays: ${country}
+Intention SEO: ${intent}
+
+TEXTE SOURCE (à optimiser):
+"""
+${description}
+"""
+
+Rends un JSON strict avec ce schéma:
+{
+  "score": number,
+  "optimizedDescription": string,
+  "keywords": string[],
+  "improvements": string[]
+}
+
+Contraintes:
+- "optimizedDescription" doit être cohérent avec "${typeoffre}".
+- Ne jamais mentionner "${forbiddenWord}" ni "à louer et à vendre".
+- keywords: 8 à 15 expressions FR adaptées à ${city}, liées à "${intent}".
+`.trim();
+
+  // ✅ SDK OK : on envoie un STRING
+  const input = `${systemRules}\n\n${prompt}`;
+  const result = await model.generateContent(input);
+
+  const raw = result?.response?.text?.() || "";
+  const parsed = safeJsonFromText(raw);
+
+  if (!parsed) {
+    return {
+      score: 0,
+      optimizedDescription: description,
+      keywords: [],
+      improvements: [
+        "Impossible de parser la réponse Gemini en JSON. Vérifie GEMINI_API_KEY / GEMINI_MODEL.",
+        "Astuce: assure-toi que Gemini répond uniquement en JSON (sans texte autour).",
+      ],
+    };
+  }
+
+  let optimizedDescription =
+    typeof parsed.optimizedDescription === "string" ? parsed.optimizedDescription.trim() : description;
+
+  // ✅ GARDE-FOU serveur :
+  // Si location -> on supprime vente ; si vente -> on supprime location
+  const reForbidden =
+    typeoffre === "Louer"
+      ? /\b(à\s*vendre|a\s*vendre|vente|vendre)\b/gi
+      : /\b(à\s*louer|a\s*louer|location|louer)\b/gi;
+
+  optimizedDescription = optimizedDescription
+    .replace(reForbidden, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  // Si le mot requis n'apparait pas, on réinjecte une intro propre
+  if (!new RegExp(`\\b${requiredWord}\\b`, "i").test(optimizedDescription)) {
+    optimizedDescription = `${typeoffre === "Louer" ? "Maison à louer" : "Maison à vendre"} à ${city}, ${country}.\n\n${optimizedDescription}`.trim();
+  }
+
+  const keywords = Array.isArray(parsed.keywords)
+    ? parsed.keywords.map(String).map((s) => s.trim()).filter(Boolean)
+    : [];
+
+  const improvements = Array.isArray(parsed.improvements)
+    ? parsed.improvements.map(String).map((s) => s.trim()).filter(Boolean)
+    : [];
+
+  return {
+    score: clampScore(parsed.score),
+    optimizedDescription,
+    keywords: keywords.slice(0, 20),
+    improvements: improvements.slice(0, 20),
+  };
 }
